@@ -86,11 +86,11 @@ def _kernel_grouped_gemm(
                 # split M first then N
                 tile_m_index = gindex % num_m_tiles
                 tile_n_index = gindex // num_m_tiles
-                accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K)), dtype=tl.float32
+                accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32
                 # tl.static_assert(K % BLOCK_SIZE_K==0)
 
-                m_offset = (M_start_offset + tile_m_index * BLOCK_SIZE_M)).to(tl.int32)
-                n_offset = (N_start_offset + tile_n_index * BLOCK_SIZE_N)).to(tl.int32))
+                m_offset = (M_start_offset + tile_m_index * BLOCK_SIZE_M).to(tl.int32)
+                n_offset = (N_start_offset + tile_n_index * BLOCK_SIZE_N).to(tl.int32))
                 for k_offset in range(0, K, BLOCK_SIZE_K):
                     a = tl.experimental_descriptor_load(
                         a_desc_ptr,
@@ -115,12 +115,5 @@ def _kernel_grouped_gemm(
                 )
                 block_id_x += NUM_SMS
             iterated_tiles += num_tiles
-
-
-
-
-
-
-
 
 )
