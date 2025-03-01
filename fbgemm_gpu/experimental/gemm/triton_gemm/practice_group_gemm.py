@@ -1,3 +1,5 @@
+from os import device_encoding
+from re import X
 from typing import Optional
 
 import torch
@@ -86,11 +88,11 @@ def _kernel_grouped_gemm(
                 # split M first then N
                 tile_m_index = gindex % num_m_tiles
                 tile_n_index = gindex // num_m_tiles
-                accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32
+                accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
                 # tl.static_assert(K % BLOCK_SIZE_K==0)
 
                 m_offset = (M_start_offset + tile_m_index * BLOCK_SIZE_M).to(tl.int32)
-                n_offset = (N_start_offset + tile_n_index * BLOCK_SIZE_N).to(tl.int32))
+                n_offset = (N_start_offset + tile_n_index * BLOCK_SIZE_N).to(tl.int32)
                 for k_offset in range(0, K, BLOCK_SIZE_K):
                     a = tl.experimental_descriptor_load(
                         a_desc_ptr,
@@ -114,6 +116,95 @@ def _kernel_grouped_gemm(
                     [m_offset, n_offset],
                 )
                 block_id_x += NUM_SMS
+            # release
+            tl.extra.cuda.experimental_tensormap_fenceproxy_release(c_desc_ptr)
             iterated_tiles += num_tiles
 
 )
+
+
+def _grouped_gemm(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    m_sizes: torch.Tensor
+    )-> torch.Tensor
+
+    if not utils.HAS_TMA_DESC:
+        raise NotImplementedError("grouped Gemm without TMA is not supported")
+
+    G = m_sizes.shape[0]
+
+    assert x.is_contiguous()
+    assert w.is_contiguous()
+    assert m_sizes.is_contiguous()
+
+    M, K = x.shape
+    N = w.shape[0] // G
+    assert K== w.shape[1]
+
+    out = torch.empty((M,N), device = x.device, dtype = torch.bfloat16)
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+
+    desc_helper = None
+    desc_x = x
+    desc_w = w
+    workspace = None
+
+    desc_helper = utils.TmaAutoTuneHelper()
+    desc_helper.init_tma_descriptor("x")
+    desc_helper.init_tma_descriptor("w")
+    desc_x = desc_helper.get_tma_descriptor_kernel_param("x")
+    desc_w = desc_helper.get_tma_descriptor_kernel_param("w")
+
+    workspace = torch.empty(
+        NUM_SMS * utils.TmaAutoTuneHelper.TMA_SIZE,
+        device = x.device,
+        dtype = torch.uint8,
+    )
+
+    def grid(META):
+        nonlocal desc_helper
+        desc_helper.fill_2d_tma_descriptor(
+            "x",
+            x.data_ptr(),
+            M,
+            K,
+            META["BLOCK_SIZE_M"],
+            META["BLOCK_SIZE_K"],
+            x.element_size(),
+        )
+
+        desc_helper.fill_2d_tma_descriptor(
+            "w",
+            w.data_ptr(),
+            N,
+            K,
+            META["BLOCK_SIZE_N"],
+            META["BLOCK_SIZE_K"],
+            w.element_size()
+        )
+        return (NUM_SMS,)
+
+    M_BUCKET = triton.next_power_of_2(M)
+
+    _kernel_grouped_gemm[grid](
+        desc_x,
+        desc_w,
+        out,
+        workspace,
+        m_sizes,
+        G,
+        M_BUCKET,
+        N,
+        K,
+        NUM_SMS,
+    )
+
+    return out
+
+def grouped_gemm(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    m_sizes: torch.Tensor,
+) -> torch.Tensor:
+    return _grouped_gemm(x,w, m_sizes)
